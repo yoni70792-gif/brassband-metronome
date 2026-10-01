@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>自動切り替えメトロノーム・高精度版</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f4f6f8;color:#17202a;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif}
+main{max-width:620px;margin:auto;padding:14px}
+h1{text-align:center;font-size:23px;margin:5px 0 16px}
+.card{background:#fff;border-radius:18px;padding:15px;margin-bottom:13px;box-shadow:0 2px 10px rgba(0,0,0,.07)}
+.section{border:2px solid #dfe5ea;border-radius:14px;padding:12px;margin-bottom:10px}
+.section-head{display:flex;justify-content:space-between;align-items:center;font-weight:800;margin-bottom:8px}
+.inputs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+label{font-size:13px;font-weight:800}
+input[type=number]{width:100%;font-size:22px;padding:9px;border:2px solid #ccd3da;border-radius:10px;margin-top:5px}
+button{border:0;border-radius:12px;padding:13px 15px;font-size:17px;font-weight:800;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+.add{width:100%;background:#e8f0ff;color:#1454b8;border:2px solid #b9d0ff}
+.remove{background:#fff0f0;color:#c33;padding:8px 11px;font-size:14px}
+.display{text-align:center}
+.bpm{font-size:62px;font-weight:900;line-height:1.05}
+.unit{font-size:17px}
+.info{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:13px}
+.info div{background:#f3f5f7;border-radius:12px;padding:9px}
+.big{font-size:24px;font-weight:900}
+.small{font-size:12px;color:#667}
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.start{grid-column:1/-1;background:#1967d2;color:#fff;font-size:21px}
+.pause{background:#eee}
+.restart{background:#fff3d6}
+.note{font-size:13px;line-height:1.55;color:#59636e}
+.status{font-weight:800;margin-top:8px;min-height:20px}
+@media(max-width:380px){main{padding:9px}.bpm{font-size:50px}}
+</style>
+</head>
+<body>
+<main>
+<h1>🎵 自動切り替えメトロノーム</h1>
+
+<div class="card">
+  <div id="sections"></div>
+  <button type="button" id="addBtn" class="add">＋ 区間を追加</button>
+</div>
+
+<div class="card display">
+  <div class="small">現在のBPM</div>
+  <div id="bpmDisplay" class="bpm">80</div>
+  <div class="unit">BPM</div>
+  <div class="info">
+    <div><div id="remaining" class="big">16</div><div class="small">残り拍</div></div>
+    <div><div id="sectionNo" class="big">1</div><div class="small">区間</div></div>
+    <div><div id="nextBpm" class="big">88</div><div class="small">次のBPM</div></div>
+  </div>
+  <div id="status" class="status"></div>
+</div>
+
+<div class="card">
+  <label>🔊 音量
+    <input id="volume" type="range" min="0" max="100" value="70" style="width:100%;margin-top:8px">
+  </label>
+</div>
+
+<div class="card controls">
+  <button type="button" id="startBtn" class="start">▶ スタート</button>
+  <button type="button" id="pauseBtn" class="pause">⏸ 一時停止</button>
+  <button type="button" id="restartBtn" class="restart">↻ 最初から</button>
+</div>
+
+<div class="card note">
+<b>高精度タイミングについて</b><br>
+音はJavaScriptのタイマーで1拍ずつ鳴らすのではなく、Web Audio APIの時計に各拍をあらかじめ予約しています。<br>
+例：80 BPM × 16拍 → 1〜16拍目は80 BPM、17拍目から次のBPM。16拍目の音そのものは80 BPMの位置に予約されます。
+</div>
+</main>
+
+<script>
+(function(){
+"use strict";
+
+var sections=[
+ {bpm:80,beats:16},
+ {bpm:88,beats:16},
+ {bpm:96,beats:32},
+ {bpm:88,beats:16},
+ {bpm:80,beats:16}
+];
+
+var audioCtx=null;
+var scheduled=[];
+var startAudioTime=0;
+var endAudioTime=0;
+var running=false;
+var paused=false;
+var uiFrame=0;
+
+var sectionsEl=document.getElementById("sections");
+var addBtn=document.getElementById("addBtn");
+var startBtn=document.getElementById("startBtn");
+var pauseBtn=document.getElementById("pauseBtn");
+var restartBtn=document.getElementById("restartBtn");
+var bpmDisplay=document.getElementById("bpmDisplay");
+var remaining=document.getElementById("remaining");
+var sectionNo=document.getElementById("sectionNo");
+var nextBpm=document.getElementById("nextBpm");
+var volume=document.getElementById("volume");
+var statusEl=document.getElementById("status");
+
+function renderSections(){
+  sectionsEl.innerHTML="";
+  for(var i=0;i<sections.length;i++){
+    (function(index){
+      var box=document.createElement("div");
+      box.className="section";
+
+      var head=document.createElement("div");
+      head.className="section-head";
+      var title=document.createElement("span");
+      title.textContent="区間 "+(index+1);
+      head.appendChild(title);
+
+      if(sections.length>1){
+        var del=document.createElement("button");
+        del.type="button";
+        del.className="remove";
+        del.textContent="削除";
+        del.addEventListener("click",function(){
+          if(running){alert("演奏中は区間を変更できません。");return;}
+          sections.splice(index,1);
+          renderSections();
+          resetDisplay();
+        });
+        head.appendChild(del);
+      }
+
+      var inputs=document.createElement("div");
+      inputs.className="inputs";
+
+      var bl=document.createElement("label");
+      bl.textContent="BPM";
+      var bi=document.createElement("input");
+      bi.type="number";bi.min="40";bi.max="240";bi.step="1";bi.inputMode="numeric";
+      bi.value=sections[index].bpm;
+      bi.addEventListener("change",function(){
+        var v=parseInt(bi.value,10);
+        if(!isFinite(v))v=80;
+        v=Math.max(40,Math.min(240,v));
+        sections[index].bpm=v;bi.value=v;resetDisplay();
+      });
+      bl.appendChild(bi);
+
+      var tl=document.createElement("label");
+      tl.textContent="拍数";
+      var ti=document.createElement("input");
+      ti.type="number";ti.min="1";ti.step="1";ti.inputMode="numeric";
+      ti.value=sections[index].beats;
+      ti.addEventListener("change",function(){
+        var v=parseInt(ti.value,10);
+        if(!isFinite(v)||v<1)v=1;
+        sections[index].beats=v;ti.value=v;resetDisplay();
+      });
+      tl.appendChild(ti);
+
+      inputs.appendChild(bl);inputs.appendChild(tl);
+      box.appendChild(head);box.appendChild(inputs);
+      sectionsEl.appendChild(box);
+    })(i);
+  }
+}
+
+addBtn.addEventListener("click",function(){
+  if(running){alert("演奏中は区間を変更できません。");return;}
+  sections.push({bpm:80,beats:16});
+  renderSections();
+  resetDisplay();
+  var boxes=sectionsEl.querySelectorAll(".section");
+  if(boxes.length)boxes[boxes.length-1].scrollIntoView({behavior:"smooth",block:"center"});
+});
+
+function resetDisplay(){
+  if(!sections.length)return;
+  bpmDisplay.textContent=sections[0].bpm;
+  remaining.textContent=sections[0].beats;
+  sectionNo.textContent="1";
+  nextBpm.textContent=sections.length>1?sections[1].bpm:"—";
+  statusEl.textContent="";
+}
+
+function ensureAudio(){
+  if(!audioCtx){
+    var AC=window.AudioContext||window.webkitAudioContext;
+    if(!AC){alert("このブラウザでは音声機能を利用できません。");return false;}
+    audioCtx=new AC();
+  }
+  if(audioCtx.state==="suspended"){
+    var p=audioCtx.resume();
+    if(p&&p.catch)p.catch(function(){});
+  }
+  return true;
+}
+
+/* 各クリックをAudioContextの絶対時刻に直接予約する。
+   セクション境界では「次の拍」が新しいBPMになる。 */
+function scheduleClick(time,strong){
+  var osc=audioCtx.createOscillator();
+  var gain=audioCtx.createGain();
+  osc.type="square";
+  osc.frequency.setValueAtTime(strong?1500:950,time);
+  var v=parseInt(volume.value,10)/100;
+  var peak=v*(strong?0.18:0.11);
+  gain.gain.setValueAtTime(0.0001,time);
+  gain.gain.linearRampToValueAtTime(peak,time+0.001);
+  gain.gain.exponentialRampToValueAtTime(0.0001,time+0.035);
+  osc.connect(gain);gain.connect(audioCtx.destination);
+  osc.start(time);
+  osc.stop(time+0.045);
+  scheduled.push(osc);
+}
+
+function buildSchedule(){
+  scheduled=[];
+  var t=audioCtx.currentTime+0.08;
+  startAudioTime=t;
+
+  for(var s=0;s<sections.length;s++){
+    var bpm=sections[s].bpm;
+    var interval=60/bpm;
+    for(var b=0;b<sections[s].beats;b++){
+      /* b=0の時刻は、その区間の最初の拍。
+         前区間の最後の拍からここまでの間隔は、この区間のBPM。 */
+      scheduleClick(t,b===0);
+      t += interval;
+    }
+  }
+  endAudioTime=t;
+}
+
+function updateUI(){
+  if(!running){return;}
+  var now=audioCtx.currentTime;
+
+  if(now>=endAudioTime){
+    running=false;
+    paused=false;
+    statusEl.textContent="完了！";
+    updateFinal();
+    startBtn.textContent="▶ スタート";
+    pauseBtn.textContent="⏸ 一時停止";
+    return;
+  }
+
+  /* 現在時刻から「これから鳴る/直前に鳴った」拍を求める。
+     予約時刻と同じAudioContextの時計を使うので、表示だけのズレを抑える。 */
+  var t=startAudioTime;
+  var found=false;
+  for(var s=0;s<sections.length;s++){
+    var interval=60/sections[s].bpm;
+    for(var b=0;b<sections[s].beats;b++){
+      var nextT=t+interval;
+      if(now < nextT){
+        bpmDisplay.textContent=sections[s].bpm;
+        remaining.textContent=sections[s].beats-b;
+        sectionNo.textContent=s+1;
+        nextBpm.textContent=s<sections.length-1?sections[s+1].bpm:"—";
+        found=true;
+        break;
+      }
+      t=nextT;
+    }
+    if(found)break;
+  }
+  uiFrame=requestAnimationFrame(updateUI);
+}
+
+function updateFinal(){
+  var last=sections.length-1;
+  bpmDisplay.textContent=sections[last].bpm;
+  remaining.textContent="0";
+  sectionNo.textContent=sections.length;
+  nextBpm.textContent="終了";
+}
+
+startBtn.addEventListener("click",function(){
+  if(running)return;
+  if(!ensureAudio())return;
+
+  /* 念のため古い予約を消してから作る */
+  for(var i=0;i<scheduled.length;i++){
+    try{scheduled[i].stop();}catch(e){}
+  }
+  scheduled=[];
+  if(uiFrame)cancelAnimationFrame(uiFrame);
+
+  paused=false;
+  running=true;
+  statusEl.textContent="演奏中";
+  startBtn.textContent="▶ 演奏中";
+  pauseBtn.textContent="⏸ 一時停止";
+
+  buildSchedule();
+  updateUI();
+});
+
+pauseBtn.addEventListener("click",function(){
+  if(!running&&!paused)return;
+
+  if(!paused){
+    paused=true;
+    if(audioCtx)audioCtx.suspend();
+    if(uiFrame)cancelAnimationFrame(uiFrame);
+    pauseBtn.textContent="▶ 再開";
+    statusEl.textContent="一時停止中";
+  }else{
+    paused=false;
+    var p=audioCtx.resume();
+    if(p&&p.catch)p.catch(function(){});
+    pauseBtn.textContent="⏸ 一時停止";
+    statusEl.textContent="演奏中";
+    updateUI();
+  }
+});
+
+restartBtn.addEventListener("click",function(){
+  running=false;paused=false;
+  if(uiFrame)cancelAnimationFrame(uiFrame);
+  if(audioCtx){
+    for(var i=0;i<scheduled.length;i++){
+      try{scheduled[i].stop();}catch(e){}
+    }
+    scheduled=[];
+    audioCtx.suspend();
+  }
+  startBtn.textContent="▶ スタート";
+  pauseBtn.textContent="⏸ 一時停止";
+  resetDisplay();
+});
+
+renderSections();
+resetDisplay();
+})();
+</script>
+</body>
+</html>
